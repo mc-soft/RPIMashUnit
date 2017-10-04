@@ -1,0 +1,237 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using RPIMashUnit.Helper;
+using System.Xml.Serialization;
+
+namespace RPIMashUnit.Core
+{
+    [Serializable, XmlRoot("Settings")]
+    public class Settings
+    {
+        private readonly Random R = new Random();
+
+        enum Multiplier
+        {
+            Days = 86400,
+            Hours = 3600,
+            Minutes = 60
+        };
+
+        [Serializable]
+        public class EpochSettings
+        {
+            public int ReportStatus { get; set; }
+            public int PasswordChange { get; set; }
+            public int PasswordPrewarn { get; set; }
+        }
+
+        [Serializable]
+        public class PasswordSettings
+        {
+            public int ChangeFrequency { get; set; }
+            public int PrewarnFrequency { get; set; }
+
+            public bool HasWarned { get; set; }
+
+            public string Current { get; set; }
+            public string Next { get; set; }
+        }
+
+        [Serializable]
+        public class TimeSettings
+        {
+            public int ReportFrequency { get; set; }
+            public string LastBootTime { get; set; }
+
+            public int FrequencyMultiplier { get; set; }
+        }
+
+        [Serializable]
+        public class GeneralSettings
+        {
+            public string CurrentDeviceName { get; set; }
+            public string MailToStatus { get; set; }
+            public string MailToPassword { get; set; }
+
+            public string RuckusHostAddress { get; set; }
+            public string RuckusMacAddress { get; set; }
+        }
+        
+        public EpochSettings Epoch { get; set; }
+        public PasswordSettings Password { get; set; }
+        public TimeSettings Timings { get; set; }
+        public GeneralSettings General { get; set; }
+        
+        public Settings()
+        {
+            const string settingsConfig = "settings.cfg";
+            const string lastBootFile = "lastboot.dat";
+
+            if (!File.Exists(settingsConfig))
+                throw new FileNotFoundException(string.Format("Cannot find {0}", settingsConfig));
+
+            if (File.Exists(lastBootFile))
+                Timings.LastBootTime = File.ReadAllText(lastBootFile);
+            
+            Epoch = new EpochSettings();
+            Password = new PasswordSettings();
+            Timings = new TimeSettings();
+            General = new GeneralSettings();
+
+            foreach (string line in File.ReadAllLines(settingsConfig).Where(s => s.Length > 0 && s[0] != '#'))
+            {
+                var split = line.Split('=');
+                string setting = split[0];
+                string value = split[1];
+
+                switch (setting)
+                {
+                    case "devicename":
+                        General.CurrentDeviceName = value;
+                        break;
+
+                    case "rksmac":
+                        General.RuckusMacAddress = value;
+                        break;
+
+                    case "mailtostatus":
+                        General.MailToStatus = value;
+                        break;
+
+                    case "mailtopass":
+                        General.MailToPassword = value;
+                        break;
+
+                    //
+                    // Timings
+                    //
+                    case "multiplier":
+                        switch (value)
+                        {
+                            case "days":
+                                Timings.FrequencyMultiplier = (int) Multiplier.Days;
+                                break;
+
+                            case "hours":
+                                Timings.FrequencyMultiplier = (int) Multiplier.Hours;
+                                break;
+
+                            case "minutes":
+                                Timings.FrequencyMultiplier = (int) Multiplier.Minutes;
+                                break;
+
+                            default:
+                                throw new Exception("The multiplier setting must be set to either hours, days or minutes.");
+                        }
+                        break;
+
+                    case "reportfrequency":
+                        Timings.ReportFrequency = Convert.ToInt32(value);
+                        break;
+
+                    case "passchangefrequency":
+                        Password.ChangeFrequency = Convert.ToInt32(value);
+                        break;
+
+                    case "passwarningfrequency":
+                        Password.PrewarnFrequency = Convert.ToInt32(value);
+                        break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Generate and set the first password on first-time execution.
+        /// </summary>
+        public void CreateFirstPassword()
+        {
+            Log.DebugWriteLine("First run detected, creating initial password...");
+
+            Password.Next = GeneratePassword();
+            UpdatePassword();
+        }
+
+        /// <summary>
+        /// Generates the next password that will be used and emails out a notification letting people know of the upcoming change.
+        /// </summary>
+        public void CreateNextPassword()
+        {
+            Password.Next = GeneratePassword();
+
+            Log.DebugWriteLine(string.Format("Next password generated, it will be {0}.", Password.Next));
+
+            var e = new SendMail(General.MailToPassword);
+
+            while (!e.SendPasswordWarning(Password.Next, Time.EpochToTimestamp(Epoch.PasswordChange)))
+            {
+                Log.ErrorWriteLine("Failure sending password change email, trying again in 5 minutes.");
+                Thread.Sleep(60 * 5 * 1000); // Sleep for 5 minutes and then try again.
+            }
+
+            Password.HasWarned = true;
+            Serializer.Serialize(this);
+        }
+
+        /// <summary>
+        /// Changes the previously generated password to the current password and emails out a notification letting people know of the new change.
+        /// </summary>
+        public void UpdatePassword()
+        {
+            Password.Current = Password.Next;
+
+            Ruckus rks = new Ruckus();
+            while (!rks.ChangePassword(Password.Current, General.RuckusHostAddress))
+            {
+                Log.ErrorWriteLine("Failed to change password, trying again in 5 minutes.");
+                Thread.Sleep(60 * 5 * 1000); // Sleep for 5 minutes and then try again.
+            }
+
+            UpdateEpochs();
+            string nextPasswordChangeTimestamp = Time.EpochToTimestamp(Epoch.PasswordChange);
+
+            var e = new SendMail(General.MailToPassword);
+            while (!e.SendPasswordUpdate(Password.Current, nextPasswordChangeTimestamp))
+            {
+                Log.ErrorWriteLine("Failed to send new password email notification, trying again in 5 minutes.");
+                Thread.Sleep(60 * 5 * 1000); // Sleep for 5 minutes and then try again.
+            }
+
+            Log.DebugWriteLine(string.Format("Password successfully changed to {0}", Password.Current));
+            Log.DebugWriteLine(string.Format("The password will next be changed at {0}", nextPasswordChangeTimestamp));
+
+            Password.HasWarned = false;
+
+            Serializer.Serialize(this);
+        }
+
+        /// <summary>
+        /// Recalculates the epoch times for the new/next passwords.
+        /// </summary>
+        private void UpdateEpochs()
+        {
+            Epoch.PasswordChange = Time.CalculateNewPasswordChangeEpoch(Password.ChangeFrequency, Timings.FrequencyMultiplier);
+            Epoch.PasswordPrewarn = Time.CalculatePrewarningEpoch(Epoch.PasswordChange, Password.PrewarnFrequency, Timings.FrequencyMultiplier);
+        }
+
+        /// <summary>
+        /// Generates an alphanumeric password of specified length.
+        /// </summary>
+        /// <returns></returns>
+        private string GeneratePassword()
+        {
+            const int passwordLength = 10;
+            var password = new char[passwordLength];
+            const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+            for (int i = 0; i < passwordLength; i++)
+                password[i] = chars[R.Next(chars.Length)];
+
+            return new string(password);
+        }
+    }
+}

@@ -43,12 +43,23 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Core\Devices.cs" />
+    <Compile Include="Core\Ruckus.cs" />
+    <Compile Include="Core\Settings.cs" />
+    <Compile Include="Core\TelnetConnection.cs" />
+    <Compile Include="Helper\ErrorHandler.cs" />
+    <Compile Include="Helper\Log.cs" />
+    <Compile Include="Helper\Network.cs" />
+    <Compile Include="Helper\SendMail.cs" />
+    <Compile Include="Helper\Serializer.cs" />
+    <Compile Include="Helper\Time.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
        Other similar extension points exist, see Microsoft.Common.targets.
